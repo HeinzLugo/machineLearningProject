@@ -1,0 +1,96 @@
+---
+title: "Human activity recognition project"
+author: "Heinz Lugo."
+date: "21 February 2015"
+output: html_document
+---
+
+## Synopsis
+This document describes the methodology followed to develop a machine learning algorithm based on the weightlifting dataset made available by Velloso et al. (2013).
+
+## Data preprocessing
+After loading the training and test datasets, unsuitable predictors are removed. Three concepts are used to determine if a predictor is unsuitable or not:
+
+1. Columns with mostly NA or empty values are removed. If there is no data available, their for use prediction is limited.
+2. Near zero variability suggests that the variable is not a good predictor.
+3. Highly correlated variables can be removed or manipulated (e.g. PCA) to reduce the number of predictors.
+
+```{r dataLoadAndPreProcessingNA, echo=FALSE, message=FALSE, cache=TRUE, comment="", warning=FALSE}
+library(dplyr)
+library(caret)
+library(ggplot2)
+library(gridExtra)
+## Step 1. Load the training and test data sets.
+rawTrainingData <- tbl_df(read.table("trainingHARData.csv", sep = ",", na.strings = c("NA", ""),stringsAsFactors=FALSE, header=TRUE)) 
+rawTestingData <- tbl_df(read.table("testingHARData.csv", sep = ",", na.strings = c("NA", ""), stringsAsFactors=FALSE, header=TRUE))
+## Step 2. Exploratory analisys on training data set.
+emptyRowsCounters <- tbl_df(data.frame(predictor = character(length = (ncol(rawTrainingData) - 1)), columnID = numeric(length = (ncol(rawTrainingData) - 1)),countNA = numeric(length = (ncol(rawTrainingData) - 1)), stringsAsFactors = FALSE))
+namesRawTrainingData <- names(rawTrainingData)
+## Step 2.1. Check which columns have a large number of NAs or empty values as these are not suitable for a
+## good predictor.
+for(i in 1:(ncol(rawTrainingData) - 1))
+{
+  emptyRowsCounters$predictor[i] <- namesRawTrainingData[i]
+  emptyRowsCounters$columnID[i] <- i
+  emptyRowsCounters$countNA[i] <- sum(is.na(rawTrainingData[,i]))
+}
+## Step 2.2. Remove unsuitable predictors.
+columnsToRemove <- which(emptyRowsCounters$countNA == 19216)
+processedTrainingData <- rawTrainingData[, -columnsToRemove]
+```
+
+There are a 100 columns from the original dataset with a total of 19216 NA or empty (i.e."") values, these are removed.
+
+```{r dataPreProcessingNearZeroVariability, echo=FALSE, message=FALSE, cache=TRUE, comment="", warning=FALSE, fig.align='center'}
+## Step 2.3. Remove near zero variables and non-movement specific variables (e.g. window, num_window)
+nearZeroEvaluation <- nearZeroVar(processedTrainingData, saveMetrics = TRUE)
+user_class_windowGraph <- ggplot(processedTrainingData, aes(user_name, classe, col = new_window)) + geom_point(position = "jitter") +
+  labs(x = "User name", y = "Classe", title = "Class for every user in the test set") + theme(legend.position = "bottom")
+timestamp_class_userGraph <- ggplot(processedTrainingData, aes(raw_timestamp_part_2, classe, col = user_name)) + geom_point(position = "jitter") +
+  labs(x = "Time stamp part 2", y = "Classe", title = "Class for every time stamp\npart 2 in the test set") +  theme(legend.position = "bottom", legend.text = element_text(size = 8))
+grid.arrange(timestamp_class_userGraph, user_class_windowGraph, ncol = 2)
+```
+
+The previous graphs do not show a pattern based on the subject, the time window or the timestamps. These variables can also be removed and only the data related to physical measured variables (e.g. acceleration) should be considered as predictors. The near zero variability evaluation showed that only the new_window variable had near zero variability, so no new information was acquired.
+
+```{r dataPreProcessingCorrelationMatrix, echo=FALSE, message=FALSE, cache=TRUE, comment="", warning=FALSE, fig.align='center' }
+## Step 2.4. Narrow down the potential predictors using a correlation matrix with a threshold of 0.8.
+processedTrainingData <- processedTrainingData[, -c(1:7)]
+correlationMatrix <- abs(cor(processedTrainingData[, -53]))
+diag(correlationMatrix) <- 0
+correlationTable <- which(correlationMatrix > 0.8, arr.ind = TRUE)
+roll_pitch_class_beltGraph <- ggplot(processedTrainingData, aes(roll_belt, pitch_belt, col = classe)) + geom_point(position = "jitter") +
+  labs(x = "Roll belt", y = "Pitch belt", title = "Belt roll and pitch") +  theme(legend.position = "bottom", legend.text = element_text(size = 8))
+roll_roll_class_belt_arm_Graph <- ggplot(processedTrainingData, aes(roll_belt, roll_arm, col = classe)) + geom_point(position = "jitter") +
+  labs(x = "Roll belt", y = "Roll arm", title = "Arm and belt roll") +  theme(legend.position = "bottom", legend.text = element_text(size = 8)) 
+grid.arrange(roll_pitch_class_beltGraph, roll_roll_class_belt_arm_Graph, ncol = 2)
+acceltot_acceltot_arm_dumbell__Graph <- ggplot(processedTrainingData, aes(total_accel_arm, total_accel_dumbbell, col = classe)) + geom_point(position = "jitter") +
+  labs(x = "Total acceleration arm", y = "Total acceleration dumbbell", title = "Arm and dumbbell\ntotal acceleration") +  theme(legend.position = "bottom", legend.text = element_text(size = 8))
+```
+
+The correlation matrix shows that the roll_belt is highly correlated with total_accel_belt, accel_belt_y and
+accel_belt_z. One could remove the roll_belt but neither the total_accel_belt, the accel_belt_y or accel_belt_z are correlated with each other however, as it is only one variable it is decided to leave it as part of the model. Other variables are correlated but there is no clear relationship between variables so they are left as part of the model.
+
+The previous figures (i.e. Belt roll and pitch, Arm and belt roll) show that within each accelerometer and across accelerometers there does not seem to be a relationship that could be exploited to reduce the number of predictors. Although one could try a Principal Competent Analysis (PCA) the resulting vectors would be difficult to physically interpret.
+
+## Machine algorithm
+Being the classe variable a factor, a tree approach is suitable. However, with so many potential predictors and with no way of knowing their accuracy and quality they should be considered weak predictors. Based on this a boosting with trees approach is followed.
+### Cross validation
+A k-fold cross validation with 10 folds is followed, this is setup as part of the train function using a trainControl object. According to the results of the model the expected in-sample accuracy is close to 0.97.
+
+```{r machinelearning, echo=FALSE, message=FALSE, cache=TRUE, comment="", warning=FALSE}
+## Step 3. Machine learning algorithm and k-fold cross validation.
+## Step 3.1. Set the train control for k-fold cross validation with 10 folds.
+fitControl <- trainControl(method = "cv", number = 10)
+## Step 3.2. Set the machine learning algorithm as boosted tree model.
+modFit <- train(as.factor(classe) ~ ., method = "gbm", data = processedTrainingData, trControl = fitControl, verbose = FALSE)
+modFit
+```
+
+## Prediction on the test data.
+```{r predictionValidationData, echo=FALSE, message=FALSE, cache=TRUE, comment="", warning=FALSE}
+## Step 5.3. Use the model on the validation test data.
+validationPrediction <-  predict(modFit, rawTestingData)
+reportingDataFrame <- data.frame(user_name = rawTestingData$user_name, prediction = validationPrediction)
+reportingDataFrame
+```
